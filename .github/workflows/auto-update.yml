@@ -1,0 +1,123 @@
+name: Monitor and Update AUR package
+
+on:
+  schedule:
+    - cron: '0 */12 * * *'  # 每12小时运行一次
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  check-and-update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0  # 获取完整历史记录
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openssh-client git curl jq
+
+      - name: Check for new releases
+        id: check_release
+        run: |
+          # 从 PKGBUILD 获取当前版本
+          CURRENT_VERSION=$(grep -Po 'pkgver=\K[^\s]+' PKGBUILD)
+          echo "Current version: $CURRENT_VERSION"
+          
+          # 从 GitHub API 获取最新版本
+          LATEST_RELEASE=$(curl -s "https://api.github.com/repos/lollipopkit/flutter_server_box/releases/latest")
+          LATEST_VERSION=$(echo $LATEST_RELEASE | jq -r '.tag_name' | sed 's/^v//')
+          echo "Latest version: $LATEST_VERSION"
+          
+          # 检查是否有新版本
+          if [ "$LATEST_VERSION" != "$CURRENT_VERSION" ]; then
+            echo "New version available: $LATEST_VERSION"
+            echo "latest_version=$LATEST_VERSION" >> $GITHUB_OUTPUT
+            
+            # 获取资产列表
+            ASSETS=$(echo $LATEST_RELEASE | jq -r '.assets[] | {name: .name, url: .browser_download_url}')
+            APPIMAGE_URL=$(echo $ASSETS | jq -r 'select(.name | test(".*x86_64.*appimage$|.*amd64.*appimage$"; "i")) | .url')
+            
+            if [ -z "$APPIMAGE_URL" ]; then
+              echo "Failed to find AppImage URL"
+              exit 1
+            fi
+            
+            echo "AppImage URL: $APPIMAGE_URL"
+            echo "appimage_url=$APPIMAGE_URL" >> $GITHUB_OUTPUT
+            echo "update_needed=true" >> $GITHUB_OUTPUT
+          else
+            echo "Already at latest version"
+            echo "update_needed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update PKGBUILD
+        if: steps.check_release.outputs.update_needed == 'true'
+        run: |
+          LATEST_VERSION=${{ steps.check_release.outputs.latest_version }}
+          APPIMAGE_URL=${{ steps.check_release.outputs.appimage_url }}
+          
+          # 下载 AppImage 计算校验和
+          echo "Downloading AppImage to calculate checksum..."
+          curl -L -o appimage.AppImage "$APPIMAGE_URL"
+          SHA256SUM=$(sha256sum appimage.AppImage | awk '{print $1}')
+          echo "SHA256: $SHA256SUM"
+          
+          # 更新 PKGBUILD
+          sed -i "s/pkgver=.*/pkgver=$LATEST_VERSION/" PKGBUILD
+          sed -i "s|source=(\".*\")|source=(\"$APPIMAGE_URL\")|" PKGBUILD
+          sed -i "s/sha256sums=('.*')/sha256sums=('$SHA256SUM')/" PKGBUILD
+          sed -i "s/pkgrel=.*/pkgrel=1/" PKGBUILD  # 重置 pkgrel
+          
+          # 显示更新后的 PKGBUILD
+          cat PKGBUILD
+
+      - name: Update .SRCINFO
+        if: steps.check_release.outputs.update_needed == 'true'
+        run: |
+          docker run --rm -v ${{ github.workspace }}:/pkg archlinux:base bash -c 'pacman -Syu --noconfirm && pacman -S --noconfirm pacman-contrib && cd /pkg && makepkg --printsrcinfo > .SRCINFO'
+          cat .SRCINFO
+
+      - name: Setup SSH key
+        if: steps.check_release.outputs.update_needed == 'true'
+        uses: webfactory/ssh-agent@v0.8.0
+        with:
+          ssh-private-key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+
+      - name: Setup Git for AUR
+        if: steps.check_release.outputs.update_needed == 'true'
+        run: |
+          git config --global user.name "${{ secrets.AUR_USERNAME }}"
+          git config --global user.email "${{ secrets.AUR_EMAIL }}"
+          mkdir -p ~/.ssh
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
+
+      - name: Commit changes to GitHub
+        if: steps.check_release.outputs.update_needed == 'true'
+        run: |
+          LATEST_VERSION=${{ steps.check_release.outputs.latest_version }}
+          git add PKGBUILD .SRCINFO
+          git commit -m "Update to version $LATEST_VERSION"
+          git push
+
+      - name: Push to AUR
+        if: steps.check_release.outputs.update_needed == 'true'
+        run: |
+          # 当前包名，从.SRCINFO中提取
+          PKG_NAME=$(grep -Po 'pkgname\s*=\s*\K[^\s]+' .SRCINFO)
+          LATEST_VERSION=${{ steps.check_release.outputs.latest_version }}
+          echo "Publishing package: $PKG_NAME version $LATEST_VERSION to AUR"
+
+          # 克隆AUR仓库
+          git clone ssh://aur@aur.archlinux.org/$PKG_NAME.git aur-repo
+          
+          # 使用rsync确保只复制必要的文件
+          rsync -av --exclude='.git' --exclude='.github' --exclude='aur-repo' --exclude='README.md' ./ aur-repo/
+          
+          # 提交到AUR
+          cd aur-repo
+          git add .
+          git commit -m "Update to version $LATEST_VERSION"
+          git push
