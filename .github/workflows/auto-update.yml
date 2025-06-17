@@ -93,33 +93,60 @@ jobs:
             IdentityFile ~/.ssh/aur_key
             User aur
           EOF
-      - name: Setup Git for AUR
+      - name: Setup SSH key and Git for AUR
         if: steps.check_release.outputs.update_needed == 'true'
         run: |
+          # 设置 SSH 密钥
+          mkdir -p ~/.ssh
+          echo "${{ secrets.AUR_SSH_PRIVATE_KEY }}" > ~/.ssh/aur_key
+          chmod 600 ~/.ssh/aur_key
+    
+          # 添加 AUR 主机密钥
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
+    
+          # 配置 SSH
+          cat >> ~/.ssh/config << EOF
+          Host aur.archlinux.org
+            IdentityFile ~/.ssh/aur_key
+            User aur
+            IdentitiesOnly yes
+          EOF
+    
+          # 测试 SSH 连接
+          ssh -T aur@aur.archlinux.org || echo "SSH connection test completed"
+          
+          # 配置 Git
           git config --global user.name "${{ secrets.AUR_USERNAME }}"
           git config --global user.email "${{ secrets.AUR_EMAIL }}"
-          mkdir -p ~/.ssh
-          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
+      
       - name: Commit changes to GitHub
         if: steps.check_release.outputs.update_needed == 'true'
         run: |
           LATEST_VERSION=${{ steps.check_release.outputs.latest_version }}
+          # 修复文件权限
+          sudo chown -R runner:runner ${{ github.workspace }}
+          # 清理可能的锁文件
+          rm -f .git/index.lock
+          # 提交更改
           git add PKGBUILD .SRCINFO
           git commit -m "Update to version $LATEST_VERSION"
           git push
+      
       - name: Push to AUR
         if: steps.check_release.outputs.update_needed == 'true'
         run: |
-          # 当前包名，从.SRCINFO中提取
           PKG_NAME=$(grep -Po 'pkgname\s*=\s*\K[^\s]+' .SRCINFO)
           LATEST_VERSION=${{ steps.check_release.outputs.latest_version }}
           echo "Publishing package: $PKG_NAME version $LATEST_VERSION to AUR"
-          # 克隆AUR仓库
+          
+          # 克隆 AUR 仓库
           git clone ssh://aur@aur.archlinux.org/$PKG_NAME.git aur-repo
-          # 使用rsync确保只复制必要的文件
-          rsync -av --exclude='.git' --exclude='.github' --exclude='aur-repo' --exclude='README.md' ./ aur-repo/
-          # 提交到AUR
+          
+          # 复制文件
+          cp PKGBUILD .SRCINFO aur-repo/
+          
+          # 提交到 AUR
           cd aur-repo
-          git add .
-          git commit -m "Update to version $LATEST_VERSION"
+          git add PKGBUILD .SRCINFO
+          git commit -m "Update to version $LATEST_VERSION" || echo "No changes to commit"
           git push
