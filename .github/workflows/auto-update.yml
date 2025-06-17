@@ -3,6 +3,11 @@ on:
   schedule:
     - cron: '0 */12 * * *'  # 每12小时运行一次
   workflow_dispatch:  # 允许手动触发
+
+# 添加权限配置
+permissions:
+  contents: write  # 允许写入仓库内容
+
 jobs:
   check-and-update:
     runs-on: ubuntu-latest
