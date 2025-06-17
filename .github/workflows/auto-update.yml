@@ -72,6 +72,8 @@ jobs:
           chown -R builduser:builduser /pkg && 
           sudo -u builduser bash -c "cd /pkg && makepkg --printsrcinfo > .SRCINFO"
           '
+          # 立即修复权限
+          sudo chown -R runner:runner ${{ github.workspace }}
           cat .SRCINFO
       - name: Setup SSH key
         if: steps.check_release.outputs.update_needed == 'true'
