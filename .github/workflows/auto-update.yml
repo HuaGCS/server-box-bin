@@ -75,9 +75,17 @@ jobs:
           cat .SRCINFO
       - name: Setup SSH key
         if: steps.check_release.outputs.update_needed == 'true'
-        uses: webfactory/ssh-agent@v0.8.0
-        with:
-          ssh-private-key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.AUR_SSH_PRIVATE_KEY }}" > ~/.ssh/aur_key
+          chmod 600 ~/.ssh/aur_key
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
+          # 配置 SSH 使用指定的密钥
+          cat >> ~/.ssh/config << EOF
+          Host aur.archlinux.org
+            IdentityFile ~/.ssh/aur_key
+            User aur
+          EOF
       - name: Setup Git for AUR
         if: steps.check_release.outputs.update_needed == 'true'
         run: |
