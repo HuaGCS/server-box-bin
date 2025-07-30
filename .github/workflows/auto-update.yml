@@ -44,6 +44,11 @@ jobs:
             echo "AppImage URL: $APPIMAGE_URL"
             echo "appimage_url=$APPIMAGE_URL" >> $GITHUB_OUTPUT
             echo "update_needed=true" >> $GITHUB_OUTPUT
+            
+            # 提取 AppImage 文件名，用于后续替换
+            APPIMAGE_FILENAME=$(basename "$APPIMAGE_URL")
+            echo "AppImage filename: $APPIMAGE_FILENAME"
+            echo "appimage_filename=$APPIMAGE_FILENAME" >> $GITHUB_OUTPUT
           else
             echo "Already at latest version"
             echo "update_needed=false" >> $GITHUB_OUTPUT
@@ -53,18 +58,38 @@ jobs:
         run: |
           LATEST_VERSION=${{ steps.check_release.outputs.latest_version }}
           APPIMAGE_URL=${{ steps.check_release.outputs.appimage_url }}
+          APPIMAGE_FILENAME=${{ steps.check_release.outputs.appimage_filename }}
+          
           # 下载 AppImage 计算校验和
           echo "Downloading AppImage to calculate checksum..."
           curl -L -o appimage.AppImage "$APPIMAGE_URL"
           SHA256SUM=$(sha256sum appimage.AppImage | awk '{print $1}')
           echo "SHA256: $SHA256SUM"
+          
           # 更新 PKGBUILD
           sed -i "s/pkgver=.*/pkgver=$LATEST_VERSION/" PKGBUILD
           sed -i "s|source=(\".*\")|source=(\"$APPIMAGE_URL\")|" PKGBUILD
           sed -i "s/sha256sums=('.*')/sha256sums=('$SHA256SUM')/" PKGBUILD
           sed -i "s/pkgrel=.*/pkgrel=1/" PKGBUILD  # 重置 pkgrel
+          
+          # 特别处理：替换所有硬编码的旧 AppImage 文件名
+          # 首先从当前的 source 行提取当前的文件名
+          CURRENT_APPIMAGE=$(grep -Po 'source=\(".*\/\K[^"\/]+(?="\))' PKGBUILD)
+          echo "Current AppImage filename in PKGBUILD: $CURRENT_APPIMAGE"
+          echo "New AppImage filename: $APPIMAGE_FILENAME"
+          
+          # 如果文件名不同，则替换所有出现的地方
+          if [ "$CURRENT_APPIMAGE" != "$APPIMAGE_FILENAME" ]; then
+            echo "Replacing hardcoded filename references..."
+            # 替换所有硬编码的文件名引用
+            sed -i "s|\$srcdir/$CURRENT_APPIMAGE|\$srcdir/\$appimage_file|g" PKGBUILD
+            sed -i "s|\"$CURRENT_APPIMAGE\"|\"$APPIMAGE_FILENAME\"|g" PKGBUILD
+            sed -i "s|$CURRENT_APPIMAGE|\$appimage_file|g" PKGBUILD
+          fi
+          
           # 清理下载的文件
           rm -f appimage.AppImage
+          
           # 显示更新后的 PKGBUILD
           cat PKGBUILD
       - name: Update .SRCINFO
