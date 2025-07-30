@@ -1,7 +1,7 @@
 # Maintainer: Hua <majicdh@gmail.com>
 
 pkgname=server-box-bin
-pkgver=1.0.1201
+pkgver=1.0.1128
 pkgrel=1
 pkgdesc="ServerBox - A flutter app that helps you connect to your server."
 arch=('x86_64')
