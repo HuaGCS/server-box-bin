@@ -33,6 +33,7 @@ jobs:
           # 从 PKGBUILD 获取当前版本
           CURRENT_VERSION=$(grep -Po 'pkgver=\K[^\s]+' PKGBUILD)
           echo "Current version: $CURRENT_VERSION"
+          echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
 
           # 从 GitHub API 获取最新 release
           LATEST_RELEASE=$(curl -s "https://api.github.com/repos/lollipopkit/flutter_server_box/releases/latest")
@@ -78,6 +79,7 @@ jobs:
         if: steps.check_release.outputs.update_needed == 'true'
         run: |
           LATEST_VERSION="${{ steps.check_release.outputs.latest_version }}"
+          CURRENT_VERSION="${{ steps.check_release.outputs.current_version }}"
           APPIMAGE_FILENAME="${{ steps.check_release.outputs.appimage_filename }}"
           APPIMAGE_URL="${{ steps.check_release.outputs.appimage_url }}"
 
@@ -95,8 +97,16 @@ jobs:
 
           # 更新 pkgver
           sed -i "s/^pkgver=.*/pkgver=${LATEST_VERSION}/" PKGBUILD
-          # 重置 pkgrel
-          sed -i "s/^pkgrel=.*/pkgrel=1/" PKGBUILD
+
+          # pkgrel 处理：版本号变了重置为1，没变（强制更新）则加1
+          if [ "$LATEST_VERSION" = "$CURRENT_VERSION" ]; then
+            CURRENT_PKGREL=$(grep -Po '^pkgrel=\K[^\s]+' PKGBUILD)
+            NEW_PKGREL=$((CURRENT_PKGREL + 1))
+            echo "Same version, bumping pkgrel: $CURRENT_PKGREL -> $NEW_PKGREL"
+            sed -i "s/^pkgrel=.*/pkgrel=${NEW_PKGREL}/" PKGBUILD
+          else
+            sed -i "s/^pkgrel=.*/pkgrel=1/" PKGBUILD
+          fi
           # 更新 _appimage_filename（这是唯一需要改的文件名变量）
           sed -i "s|^_appimage_filename=.*|_appimage_filename=\"${APPIMAGE_FILENAME}\"|" PKGBUILD
           # 更新 sha256sums
