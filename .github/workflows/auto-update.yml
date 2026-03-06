@@ -1,12 +1,11 @@
 name: Monitor and Update AUR package
 on:
   schedule:
-    - cron: '0 */12 * * *'  # 每12小时运行一次
-  workflow_dispatch:  # 允许手动触发
+    - cron: '0 */12 * * *'
+  workflow_dispatch:
 
-# 添加权限配置
 permissions:
-  contents: write  # 允许写入仓库内容
+  contents: write
 
 jobs:
   check-and-update:
@@ -15,162 +14,139 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
         with:
-          fetch-depth: 0  # 获取完整历史记录
+          fetch-depth: 0
+
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y openssh-client git curl jq
+
       - name: Check for new releases
         id: check_release
         run: |
           # 从 PKGBUILD 获取当前版本
           CURRENT_VERSION=$(grep -Po 'pkgver=\K[^\s]+' PKGBUILD)
           echo "Current version: $CURRENT_VERSION"
-          # 从 GitHub API 获取最新版本
+
+          # 从 GitHub API 获取最新 release
           LATEST_RELEASE=$(curl -s "https://api.github.com/repos/lollipopkit/flutter_server_box/releases/latest")
-          LATEST_VERSION=$(echo $LATEST_RELEASE | jq -r '.tag_name' | sed 's/^v//')
+          LATEST_VERSION=$(echo "$LATEST_RELEASE" | jq -r '.tag_name' | sed 's/^v//')
           echo "Latest version: $LATEST_VERSION"
-          # 检查是否有新版本
-          if [ "$LATEST_VERSION" != "$CURRENT_VERSION" ]; then
-            echo "New version available: $LATEST_VERSION"
-            echo "latest_version=$LATEST_VERSION" >> $GITHUB_OUTPUT
-            # 获取资产列表
-            ASSETS=$(echo $LATEST_RELEASE | jq -r '.assets[] | {name: .name, url: .browser_download_url}')
-            APPIMAGE_URL=$(echo $ASSETS | jq -r 'select(.name | test(".*x86_64.*appimage$|.*amd64.*appimage$"; "i")) | .url')
-            if [ -z "$APPIMAGE_URL" ]; then
-              echo "Failed to find AppImage URL"
-              exit 1
-            fi
-            echo "AppImage URL: $APPIMAGE_URL"
-            echo "appimage_url=$APPIMAGE_URL" >> $GITHUB_OUTPUT
-            echo "update_needed=true" >> $GITHUB_OUTPUT
-            
-            # 提取 AppImage 文件名，用于后续替换
-            APPIMAGE_FILENAME=$(basename "$APPIMAGE_URL")
-            echo "AppImage filename: $APPIMAGE_FILENAME"
-            echo "appimage_filename=$APPIMAGE_FILENAME" >> $GITHUB_OUTPUT
-          else
+
+          if [ "$LATEST_VERSION" = "$CURRENT_VERSION" ]; then
             echo "Already at latest version"
             echo "update_needed=false" >> $GITHUB_OUTPUT
+            exit 0
           fi
+
+          echo "New version available: $LATEST_VERSION"
+          echo "latest_version=$LATEST_VERSION" >> $GITHUB_OUTPUT
+          echo "update_needed=true" >> $GITHUB_OUTPUT
+
+          # ===== 动态匹配 AppImage 文件名 =====
+          # 从 release assets 中正则匹配，不硬编码格式
+          APPIMAGE_ASSET=$(echo "$LATEST_RELEASE" | jq -r '
+            .assets[] | select(.name | test(".*amd64\\.AppImage$"; "i"))
+            | {name: .name, url: .browser_download_url}')
+
+          if [ -z "$APPIMAGE_ASSET" ]; then
+            echo "ERROR: No amd64 AppImage found in release assets!"
+            echo "Available assets:"
+            echo "$LATEST_RELEASE" | jq -r '.assets[].name'
+            exit 1
+          fi
+
+          APPIMAGE_FILENAME=$(echo "$APPIMAGE_ASSET" | jq -r '.name')
+          APPIMAGE_URL=$(echo "$APPIMAGE_ASSET" | jq -r '.url')
+
+          echo "Found AppImage: $APPIMAGE_FILENAME"
+          echo "Download URL: $APPIMAGE_URL"
+          echo "appimage_filename=$APPIMAGE_FILENAME" >> $GITHUB_OUTPUT
+          echo "appimage_url=$APPIMAGE_URL" >> $GITHUB_OUTPUT
+
       - name: Update PKGBUILD
         if: steps.check_release.outputs.update_needed == 'true'
         run: |
-          LATEST_VERSION=${{ steps.check_release.outputs.latest_version }}
-          APPIMAGE_URL=${{ steps.check_release.outputs.appimage_url }}
-          APPIMAGE_FILENAME=${{ steps.check_release.outputs.appimage_filename }}
-          
-          # 下载 AppImage 计算校验和
+          LATEST_VERSION="${{ steps.check_release.outputs.latest_version }}"
+          APPIMAGE_FILENAME="${{ steps.check_release.outputs.appimage_filename }}"
+          APPIMAGE_URL="${{ steps.check_release.outputs.appimage_url }}"
+
+          # 下载并计算校验和
           echo "Downloading AppImage to calculate checksum..."
           curl -L -o appimage.AppImage "$APPIMAGE_URL"
           SHA256SUM=$(sha256sum appimage.AppImage | awk '{print $1}')
           echo "SHA256: $SHA256SUM"
-          
-          # 更新 PKGBUILD
-          sed -i "s/pkgver=.*/pkgver=$LATEST_VERSION/" PKGBUILD
-          sed -i "s|source=(\".*\")|source=(\"$APPIMAGE_URL\")|" PKGBUILD
-          sed -i "s/sha256sums=('.*')/sha256sums=('$SHA256SUM')/" PKGBUILD
-          sed -i "s/pkgrel=.*/pkgrel=1/" PKGBUILD  # 重置 pkgrel
-          
-          # 特别处理：替换所有硬编码的旧 AppImage 文件名
-          # 首先从当前的 source 行提取当前的文件名
-          CURRENT_APPIMAGE=$(grep -Po 'source=\(".*\/\K[^"\/]+(?="\))' PKGBUILD)
-          echo "Current AppImage filename in PKGBUILD: $CURRENT_APPIMAGE"
-          echo "New AppImage filename: $APPIMAGE_FILENAME"
-          
-          # 如果文件名不同，则替换所有出现的地方
-          if [ "$CURRENT_APPIMAGE" != "$APPIMAGE_FILENAME" ]; then
-            echo "Replacing hardcoded filename references..."
-            # 替换所有硬编码的文件名引用
-            sed -i "s|\$srcdir/$CURRENT_APPIMAGE|\$srcdir/\$appimage_file|g" PKGBUILD
-            sed -i "s|\"$CURRENT_APPIMAGE\"|\"$APPIMAGE_FILENAME\"|g" PKGBUILD
-            sed -i "s|$CURRENT_APPIMAGE|\$appimage_file|g" PKGBUILD
-          fi
-          
-          # 清理下载的文件
           rm -f appimage.AppImage
-          
-          # 显示更新后的 PKGBUILD
+
+          # 获取当前 PKGBUILD 中的 _appimage_filename
+          OLD_FILENAME=$(grep -Po '_appimage_filename="\K[^"]+' PKGBUILD)
+          echo "Old filename: $OLD_FILENAME"
+          echo "New filename: $APPIMAGE_FILENAME"
+
+          # 更新 pkgver
+          sed -i "s/^pkgver=.*/pkgver=${LATEST_VERSION}/" PKGBUILD
+          # 重置 pkgrel
+          sed -i "s/^pkgrel=.*/pkgrel=1/" PKGBUILD
+          # 更新 _appimage_filename（这是唯一需要改的文件名变量）
+          sed -i "s|^_appimage_filename=.*|_appimage_filename=\"${APPIMAGE_FILENAME}\"|" PKGBUILD
+          # 更新 sha256sums
+          sed -i "s/sha256sums=('.*')/sha256sums=('${SHA256SUM}')/" PKGBUILD
+
+          echo "=== Updated PKGBUILD ==="
           cat PKGBUILD
+
       - name: Update .SRCINFO
         if: steps.check_release.outputs.update_needed == 'true'
         run: |
           docker run --rm -v ${{ github.workspace }}:/pkg archlinux:base bash -c '
-          pacman -Syu --noconfirm && 
-          pacman -S --noconfirm pacman-contrib sudo && 
-          useradd -m builduser && 
-          chown -R builduser:builduser /pkg && 
+          pacman -Syu --noconfirm &&
+          pacman -S --noconfirm pacman-contrib sudo &&
+          useradd -m builduser &&
+          chown -R builduser:builduser /pkg &&
           sudo -u builduser bash -c "cd /pkg && makepkg --printsrcinfo > .SRCINFO"
           '
-          # 立即修复权限
           sudo chown -R runner:runner ${{ github.workspace }}
           cat .SRCINFO
-      - name: Setup SSH key
-        if: steps.check_release.outputs.update_needed == 'true'
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.AUR_SSH_PRIVATE_KEY }}" > ~/.ssh/aur_key
-          chmod 600 ~/.ssh/aur_key
-          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
-          # 配置 SSH 使用指定的密钥
-          cat >> ~/.ssh/config << EOF
-          Host aur.archlinux.org
-            IdentityFile ~/.ssh/aur_key
-            User aur
-          EOF
+
       - name: Setup SSH key and Git for AUR
         if: steps.check_release.outputs.update_needed == 'true'
         run: |
-          # 设置 SSH 密钥
           mkdir -p ~/.ssh
           echo "${{ secrets.AUR_SSH_PRIVATE_KEY }}" > ~/.ssh/aur_key
           chmod 600 ~/.ssh/aur_key
-    
-          # 添加 AUR 主机密钥
           ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
-    
-          # 配置 SSH
+
           cat >> ~/.ssh/config << EOF
           Host aur.archlinux.org
             IdentityFile ~/.ssh/aur_key
             User aur
             IdentitiesOnly yes
           EOF
-    
-          # 测试 SSH 连接
+
           ssh -T aur@aur.archlinux.org || echo "SSH connection test completed"
-          
-          # 配置 Git
+
           git config --global user.name "${{ secrets.AUR_USERNAME }}"
           git config --global user.email "${{ secrets.AUR_EMAIL }}"
-      
+
       - name: Commit changes to GitHub
         if: steps.check_release.outputs.update_needed == 'true'
         run: |
           LATEST_VERSION=${{ steps.check_release.outputs.latest_version }}
-          # 修复文件权限
           sudo chown -R runner:runner ${{ github.workspace }}
-          # 清理可能的锁文件
           rm -f .git/index.lock
-          # 提交更改
           git add PKGBUILD .SRCINFO
           git commit -m "Update to version $LATEST_VERSION"
           git push
-      
+
       - name: Push to AUR
         if: steps.check_release.outputs.update_needed == 'true'
         run: |
           PKG_NAME=$(grep -Po 'pkgname\s*=\s*\K[^\s]+' .SRCINFO)
           LATEST_VERSION=${{ steps.check_release.outputs.latest_version }}
           echo "Publishing package: $PKG_NAME version $LATEST_VERSION to AUR"
-          
-          # 克隆 AUR 仓库
+
           git clone ssh://aur@aur.archlinux.org/$PKG_NAME.git aur-repo
-          
-          # 复制文件
           cp PKGBUILD .SRCINFO aur-repo/
-          
-          # 提交到 AUR
           cd aur-repo
           git add PKGBUILD .SRCINFO
           git commit -m "Update to version $LATEST_VERSION" || echo "No changes to commit"
