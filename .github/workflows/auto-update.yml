@@ -153,8 +153,12 @@ jobs:
           sudo chown -R runner:runner ${{ github.workspace }}
           rm -f .git/index.lock
           git add PKGBUILD .SRCINFO
-          git commit -m "Update to version $LATEST_VERSION"
-          git push
+          if git diff --cached --quiet; then
+            echo "No changes to commit to GitHub, skipping"
+          else
+            git commit -m "Update to version $LATEST_VERSION"
+            git push
+          fi
 
       - name: Push to AUR
         if: steps.check_release.outputs.update_needed == 'true'
