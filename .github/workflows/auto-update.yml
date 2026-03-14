@@ -30,7 +30,7 @@ jobs:
       - name: Check for new releases
         id: check_release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           # 从 PKGBUILD 获取当前版本
           CURRENT_VERSION=$(grep -Po 'pkgver=\K[^\s]+' PKGBUILD)
