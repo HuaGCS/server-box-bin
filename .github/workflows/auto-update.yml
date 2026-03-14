@@ -29,41 +29,54 @@ jobs:
 
       - name: Check for new releases
         id: check_release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # 从 PKGBUILD 获取当前版本
           CURRENT_VERSION=$(grep -Po 'pkgver=\K[^\s]+' PKGBUILD)
           echo "Current version: $CURRENT_VERSION"
           echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
 
-          # 从 GitHub API 获取最新 release
-          LATEST_RELEASE=$(curl -s "https://api.github.com/repos/lollipopkit/flutter_server_box/releases/latest")
+          # 使用 TOKEN 请求 API，避免速率限制
+          LATEST_RELEASE=$(curl -s -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/lollipopkit/flutter_server_box/releases/latest")
+          
+          # 检查 API 是否返回了错误信息（如速率限制）
+          if echo "$LATEST_RELEASE" | jq -e '.message' >/dev/null; then
+            echo "GitHub API Error: $(echo "$LATEST_RELEASE" | jq -r '.message')"
+            exit 1
+          fi
+
           LATEST_VERSION=$(echo "$LATEST_RELEASE" | jq -r '.tag_name' | sed 's/^v//')
+          
+          if [ "$LATEST_VERSION" = "null" ] || [ -z "$LATEST_VERSION" ]; then
+            echo "Error: Could not fetch latest version"
+            exit 1
+          fi
+          
           echo "Latest version: $LATEST_VERSION"
 
+          # 如果版本一致且没有强制更新，则退出
           if [ "$LATEST_VERSION" = "$CURRENT_VERSION" ] && [ "${{ github.event.inputs.force_update }}" != "true" ]; then
             echo "Already at latest version"
             echo "update_needed=false" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          if [ "${{ github.event.inputs.force_update }}" = "true" ]; then
-            echo "Force update enabled, proceeding regardless of version match"
-          fi
-
           echo "New version available: $LATEST_VERSION"
           echo "latest_version=$LATEST_VERSION" >> $GITHUB_OUTPUT
           echo "update_needed=true" >> $GITHUB_OUTPUT
 
-          # ===== 动态匹配 AppImage 文件名 =====
-          # 从 release assets 中正则匹配，不硬编码格式
-          APPIMAGE_ASSET=$(echo "$LATEST_RELEASE" | jq -r '
-            .assets[] | select(.name | test(".*amd64\\.AppImage$"; "i"))
-            | {name: .name, url: .browser_download_url}')
+          # 使用更健壮的 jq 过滤，防止 null 迭代
+          APPIMAGE_ASSET=$(echo "$LATEST_RELEASE" | jq -c '
+            if .assets then
+              .assets[] | select(.name | test(".*amd64\\.AppImage$"; "i"))
+              | {name: .name, url: .browser_download_url}
+            else
+              empty
+            end' | head -n 1)
 
           if [ -z "$APPIMAGE_ASSET" ]; then
             echo "ERROR: No amd64 AppImage found in release assets!"
-            echo "Available assets:"
-            echo "$LATEST_RELEASE" | jq -r '.assets[].name'
             exit 1
           fi
 
@@ -71,10 +84,9 @@ jobs:
           APPIMAGE_URL=$(echo "$APPIMAGE_ASSET" | jq -r '.url')
 
           echo "Found AppImage: $APPIMAGE_FILENAME"
-          echo "Download URL: $APPIMAGE_URL"
           echo "appimage_filename=$APPIMAGE_FILENAME" >> $GITHUB_OUTPUT
           echo "appimage_url=$APPIMAGE_URL" >> $GITHUB_OUTPUT
-
+          
       - name: Update PKGBUILD
         if: steps.check_release.outputs.update_needed == 'true'
         run: |
