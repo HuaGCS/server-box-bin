@@ -54,6 +54,7 @@ jobs:
           fi
           
           echo "Latest version: $LATEST_VERSION"
+          echo "latest_version=$LATEST_VERSION" >> $GITHUB_OUTPUT
 
           # 如果版本一致且没有强制更新，则退出
           if [ "$LATEST_VERSION" = "$CURRENT_VERSION" ] && [ "${{ github.event.inputs.force_update }}" != "true" ]; then
@@ -63,7 +64,6 @@ jobs:
           fi
 
           echo "New version available: $LATEST_VERSION"
-          echo "latest_version=$LATEST_VERSION" >> $GITHUB_OUTPUT
           echo "update_needed=true" >> $GITHUB_OUTPUT
 
           # 使用更健壮的 jq 过滤，防止 null 迭代
@@ -141,7 +141,6 @@ jobs:
           cat .SRCINFO
 
       - name: Setup SSH key and Git for AUR
-        if: steps.check_release.outputs.update_needed == 'true'
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.AUR_SSH_PRIVATE_KEY }}" > ~/.ssh/aur_key
@@ -183,22 +182,44 @@ jobs:
           fi
 
       - name: Push to AUR
-        if: steps.check_release.outputs.update_needed == 'true'
         run: |
+          set -euo pipefail
+
           PKG_NAME=$(grep -Po 'pkgname\s*=\s*\K[^\s]+' .SRCINFO)
           LATEST_VERSION=${{ steps.check_release.outputs.latest_version }}
           echo "Publishing package: $PKG_NAME version $LATEST_VERSION to AUR"
 
-          git clone ssh://aur@aur.archlinux.org/$PKG_NAME.git aur-repo
-          cp PKGBUILD .SRCINFO aur-repo/
-          cd aur-repo
+          retry() {
+            local attempt
+            for attempt in 1 2 3; do
+              if "$@"; then
+                return 0
+              fi
+
+              if [ "$attempt" -eq 3 ]; then
+                echo "Command failed after $attempt attempts: $*" >&2
+                return 1
+              fi
+
+              echo "Command failed (attempt $attempt/3), retrying in 15 seconds..." >&2
+              sleep 15
+            done
+          }
+
+          AUR_REPO_DIR=$(mktemp -d)
+          trap 'rm -rf "$AUR_REPO_DIR"' EXIT
+
+          retry git clone "ssh://aur@aur.archlinux.org/$PKG_NAME.git" "$AUR_REPO_DIR/repo"
+          cp PKGBUILD .SRCINFO "$AUR_REPO_DIR/repo/"
+          cd "$AUR_REPO_DIR/repo"
           git config user.name "${{ secrets.AUR_USERNAME }}"
           git config user.email "${{ secrets.AUR_EMAIL }}"
           git add PKGBUILD .SRCINFO
           git diff --cached --stat
-          git commit -m "Update to version $LATEST_VERSION" || echo "No changes to commit"
-          GIT_SSH_COMMAND="ssh -v" git push 2>&1 || {
-            echo "Push failed, retrying..."
-            sleep 5
-            GIT_SSH_COMMAND="ssh -v" git push 2>&1
-          }
+
+          if git diff --cached --quiet; then
+            echo "AUR is already up to date"
+          else
+            git commit -m "Update to version $LATEST_VERSION"
+            retry env GIT_SSH_COMMAND="ssh -v" git push
+          fi
